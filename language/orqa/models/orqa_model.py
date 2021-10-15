@@ -505,10 +505,11 @@ def get_predictor(model_dir):
     params = json.load(f)
 
 
-  best_checkpoint_pattern = os.path.join(model_dir, "export", "best_default",
-                                         "checkpoint", "*.index")
-  best_checkpoint = tf.io.gfile.glob(
-      best_checkpoint_pattern)[0][:-len(".index")]
+  if tf.io.gfile.exists(os.path.join(model_dir, 'export')):
+    best_checkpoint_pattern = os.path.join(model_dir, "export", "best_default", "checkpoint", "*.index")
+    best_checkpoint = tf.io.gfile.glob(best_checkpoint_pattern)[0][:-len(".index")]
+  else:
+    best_checkpoint = None
   serving_input_receiver = serving_fn()
   estimator_spec = model_fn(
       features=serving_input_receiver.features,

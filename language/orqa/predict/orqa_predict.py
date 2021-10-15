@@ -30,6 +30,7 @@ flags.DEFINE_string("predictions_path", None,
                     "Path to file where predictions will be written")
 flags.DEFINE_boolean("print_prediction_samples", True,
                      "Whether to print a sample of the predictions.")
+flags.DEFINE_string("format", "txt", "Format of the dataset file.")
 
 
 def main(_):
@@ -37,8 +38,13 @@ def main(_):
   with tf.io.gfile.GFile(FLAGS.predictions_path, "w") as predictions_file:
     with tf.io.gfile.GFile(FLAGS.dataset_path) as dataset_file:
       for i, line in enumerate(dataset_file):
-        example = json.loads(line)
-        question = example["question"]
+        if FLAGS.format == 'jsonl':
+          example = json.loads(line)
+          question = example["question"]
+        elif FLAGS.format == 'txt':
+          question = line.strip()
+        else:
+          raise NotImplementedError
         predictions = predictor(question)
         predicted_answer = six.ensure_text(
             predictions["answer"], errors="ignore")
