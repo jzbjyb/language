@@ -277,8 +277,10 @@ def read(features, retriever_logits, blocks, mode, params, labels):
       gold_starts=concat_inputs.gold_starts,
       gold_ends=concat_inputs.gold_ends)
 
-  elif qa_type == 'abstractive':
+  elif qa_type in {'abstractive', 'multichoice'}:
+    answer_token_ids = tf.cast(features['answer_token_ids'], tf.int32)  # use the answer from feed
     num_blocks = tensor_utils.shape(concat_inputs.token_ids)[0]
+    num_masked = tensor_utils.shape(concat_inputs.masked_position)[0]
     masked_position = tf.tile(tf.expand_dims(concat_inputs.masked_position, 0), [num_blocks, 1])
     concat_outputs = reader_module(
       inputs=dict(
@@ -288,9 +290,13 @@ def read(features, retriever_logits, blocks, mode, params, labels):
         mlm_positions=masked_position),
       signature='mlm',
       as_dict=True)
+    # [num_blocks * num_masked, vocab_size]
+    mlm_logit = concat_outputs['mlm_logits']
+    # [num_blocks, num_masked, vocab_size]
+    mlm_logit = tf.reshape(mlm_logit, [num_blocks, num_masked, -1])
 
     return AbsReaderOutputs(
-      logits=concat_outputs['mlm_logits'],
+      logits=mlm_logit,
       blocks=blocks,
       orig_blocks=orig_blocks,
       orig_tokens=orig_tokens,
@@ -367,7 +373,7 @@ def get_predictions_extractive(reader_outputs, params):
 
 
 def get_predictions_abstractive(reader_outputs, params):
-  tokenization_info = bert_utils.get_tokenization_info(params["reader_module_path"])
+  tokenization_info = bert_utils.get_tokenization_info(params['reader_module_path'])
   with tf.io.gfile.GFile(tokenization_info['vocab_file']) as vocab_file:
     vocab = tf.constant([l.strip() for l in vocab_file.readlines()])
 
@@ -376,7 +382,7 @@ def get_predictions_abstractive(reader_outputs, params):
   logprobs = tf.math.log_softmax(logits)
   # [num_blocks, num_masked_tokens]
   token_ids = tf.argmax(logprobs, -1)
-  logprobs = tf.squeeze(tf.gather(logprobs, tf.expand_dims(token_ids, -1), axis=-1), -1)
+  logprobs = tf.squeeze(tf.gather(logprobs, tf.expand_dims(token_ids, -1), axis=2, batch_dims=2), -1)
   # [num_blocks]
   sum_logprobs = tf.reduce_max(logprobs, 1)
 
@@ -392,7 +398,43 @@ def get_predictions_abstractive(reader_outputs, params):
     Tout=tf.string)
 
   return dict(
-    answer=pred
+    answer=pred,
+    logprob=pred_sum_logprobs
+  )
+
+
+def get_predictions_multichoice(reader_outputs, params):
+  tokenization_info = bert_utils.get_tokenization_info(params['reader_module_path'])
+  with tf.io.gfile.GFile(tokenization_info['vocab_file']) as vocab_file:
+    vocab = tf.constant([l.strip() for l in vocab_file.readlines()])
+
+  # [num_masked_tokens]
+  ans_tok_ids = reader_outputs.answer_token_ids
+
+  # [num_blocks, num_masked_tokens, vocab_size]
+  logits = reader_outputs.logits
+  logprobs = tf.math.log_softmax(logits)
+
+  # [num_blocks, num_masked_tokens]
+  num_blocks = tensor_utils.shape(logprobs)[0]
+  logprobs = tf.squeeze(tf.gather(
+    logprobs, tf.tile(tf.reshape(ans_tok_ids, [1, -1, 1]), [num_blocks, 1, 1]), axis=2, batch_dims=2), -1)
+  # [num_blocks]
+  sum_logprobs = tf.reduce_sum(logprobs, -1)
+
+  pred_block_id = tf.argmax(sum_logprobs)
+  pred_sum_logprobs = sum_logprobs[pred_block_id]
+
+  pred = tf.reduce_join(tf.gather(vocab, ans_tok_ids), separator=' ')
+
+  pred = tf.py_func(
+    func=_get_final_text,
+    inp=[pred, pred, tokenization_info['do_lower_case']],
+    Tout=tf.string)
+
+  return dict(
+    answer=pred,
+    logprob=pred_sum_logprobs
   )
 
 
@@ -606,13 +648,15 @@ def get_predictor(model_dir, params: Dict[str, Any] = None):
           checkpoint_filename_with_path=best_checkpoint))
   hf_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
-  def _predict(question: str, answer: str = ''):
-    question_token_ids = hf_tokenizer.convert_tokens_to_ids(hf_tokenizer.tokenize(question))
+  def _predict(question: str, answer: str = '', num_mask_hint: bool = False, mask_token: str = '[MASK]'):
     answer_token_ids = hf_tokenizer.convert_tokens_to_ids(hf_tokenizer.tokenize(answer))
+    if num_mask_hint:
+      question = question.replace(mask_token, ' '.join([mask_token] * len(answer_token_ids)))
+    question_token_ids = hf_tokenizer.convert_tokens_to_ids(hf_tokenizer.tokenize(question))
     return session.run(
         estimator_spec.predictions, feed_dict={
           question_tensor: question,
           question_token_ids_tensor: question_token_ids,
-          answer_token_ids_tensor: question_token_ids})
+          answer_token_ids_tensor: answer_token_ids})
 
   return _predict

@@ -25,39 +25,48 @@ import tensorflow.compat.v1 as tf
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string("model_dir", None, "Model directory.")
-flags.DEFINE_string("dataset_path", None, "Data path.")
-flags.DEFINE_string("predictions_path", None,
-                    "Path to file where predictions will be written")
+flags.DEFINE_string("question_path", None, "Question file path.")
+flags.DEFINE_string("answer_path", None, "Answer file path.")
+flags.DEFINE_string("predictions_path", None, "Path to file where predictions will be written")
 flags.DEFINE_boolean("print_prediction_samples", True,
                      "Whether to print a sample of the predictions.")
 flags.DEFINE_string("format", "txt", "Format of the dataset file.")
 
 flags.DEFINE_string('qa_type', 'abstractive',
-                    'The type of QA the model performs. Chosen from "extractive", "generative"')
+                    'The type of QA the model performs. Chosen from "extractive", "generative", "multichoice"')
 
 
 def main(_):
+  FLAGS.answer_path = FLAGS.answer_path or FLAGS.question_path
+  num_mask_hint = FLAGS.qa_type == 'multichoice'
   params = {k: getattr(FLAGS, k) for k in ['qa_type']}
   predictor = orqa_model.get_predictor(FLAGS.model_dir, params)
-  with tf.io.gfile.GFile(FLAGS.predictions_path, "w") as predictions_file:
-    with tf.io.gfile.GFile(FLAGS.dataset_path) as dataset_file:
-      for i, line in enumerate(dataset_file):
-        if FLAGS.format == 'jsonl':
-          example = json.loads(line)
-          question = example["question"]
-        elif FLAGS.format == 'txt':
-          question = line.strip()
+  with tf.io.gfile.GFile(FLAGS.question_path) as qfin, \
+    tf.io.gfile.GFile(FLAGS.answer_path) as afin, \
+    tf.io.gfile.GFile(FLAGS.predictions_path, 'w') as pfout:
+    for i, line in enumerate(qfin):
+      if FLAGS.format == 'jsonl':
+        example = json.loads(line)
+        questions = [example['question']]
+        answers = ['']
+      elif FLAGS.format == 'txt':
+        questions = [line.strip()]
+        answers = afin.readline().rstrip('\n')
+        if FLAGS.qa_type == 'multichoice':
+          answers = answers.split('\t')
         else:
-          raise NotImplementedError
-        predictions = predictor(question)
-        predicted_answer = six.ensure_text(
-            predictions["answer"], errors="ignore")
-        predictions_file.write(json.dumps(dict(
-            question=question,
-            prediction=predicted_answer)))
-        predictions_file.write("\n")
-        if FLAGS.print_prediction_samples and i & (i - 1) == 0:
-          logging.info("[%d] '%s' -> '%s'", i, question, predicted_answer)
+          answers = [answers]
+        questions = questions * len(answers)
+      else:
+        raise NotImplementedError
+      for j, (question, answer) in enumerate(zip(questions, answers)):
+        predictions = predictor(question, answer, num_mask_hint=num_mask_hint)
+        pred = six.ensure_text(predictions['answer'], errors='ignore')
+        logprob = predictions['logprob']
+        pfout.write(('\t' if j > 0 else '') + f'{pred}\t{logprob}')
+      pfout.write('\n')
+      if FLAGS.print_prediction_samples and i & (i - 1) == 0:
+        logging.info(f'[{i}] {question} -> {pred}')
 
 if __name__ == "__main__":
   tf.disable_v2_behavior()
