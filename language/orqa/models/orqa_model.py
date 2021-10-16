@@ -14,9 +14,11 @@
 # limitations under the License.
 # Lint as: python3
 """ORQA model."""
+from typing import Dict, Any
 import collections
 import json
 import os
+import sys
 
 from bert import optimization
 from language.common.utils import exporters
@@ -31,6 +33,9 @@ import tensorflow.compat.v1 as tf
 import tensorflow_hub as hub
 from official.nlp.data import squad_lib
 
+from transformers import BertTokenizer
+
+
 RetrieverOutputs = collections.namedtuple("RetrieverOutputs",
                                           ["logits", "blocks"])
 ReaderOutputs = collections.namedtuple("ReaderOutputs", [
@@ -38,6 +43,8 @@ ReaderOutputs = collections.namedtuple("ReaderOutputs", [
     "candidate_orig_ends", "blocks", "orig_blocks", "orig_tokens", "token_ids",
     "gold_starts", "gold_ends"
 ])
+AbsReaderOutputs = collections.namedtuple('AbsReaderOutputs', [
+  'logits', 'blocks', 'orig_blocks', 'orig_tokens', 'token_ids', 'answer_token_ids'])
 
 
 def span_candidates(masks, max_span_width):
@@ -90,10 +97,14 @@ def retrieve(features, retriever_beam_size, mode, params):
   tokenizer, vocab_lookup_table = bert_utils.get_tf_tokenizer(
       params["retriever_module_path"])
 
+  '''
   question_token_ids = tokenizer.tokenize(
       tf.expand_dims(features["question"], 0))
   question_token_ids = tf.cast(
       question_token_ids.merge_dims(1, 2).to_tensor(), tf.int32)
+  '''
+  question_token_ids = tf.cast(tf.expand_dims(features['question_token_ids'], 0), tf.int32)
+
   cls_token_id = vocab_lookup_table.lookup(tf.constant("[CLS]"))
   sep_token_id = vocab_lookup_table.lookup(tf.constant("[SEP]"))
   question_token_ids = tf.concat(
@@ -150,6 +161,8 @@ def retrieve(features, retriever_beam_size, mode, params):
 
 
 def read(features, retriever_logits, blocks, mode, params, labels):
+  qa_type = params['qa_type']
+
   """Do reading."""
   tokenizer, vocab_lookup_table = bert_utils.get_tf_tokenizer(
       params["reader_module_path"])
@@ -159,9 +172,12 @@ def read(features, retriever_logits, blocks, mode, params, labels):
   (orig_tokens, block_token_map, block_token_ids, blocks) = (
       bert_utils.tokenize_with_original_mapping(blocks, tokenizer))
 
+  '''
   question_token_ids = tokenizer.tokenize(
       tf.expand_dims(features["question"], 0))
   question_token_ids = tf.cast(question_token_ids.flat_values, tf.int32)
+  '''
+  question_token_ids = tf.cast(features['question_token_ids'], tf.int32)
 
   orig_tokens = orig_tokens.to_tensor(default_value="")
   block_lengths = tf.cast(block_token_ids.row_lengths(), tf.int32)
@@ -174,6 +190,7 @@ def read(features, retriever_logits, blocks, mode, params, labels):
 
   cls_token_id = vocab_lookup_table.lookup(tf.constant("[CLS]"))
   sep_token_id = vocab_lookup_table.lookup(tf.constant("[SEP]"))
+  mask_token_id = vocab_lookup_table.lookup(tf.constant('[MASK]'))
   concat_inputs = orqa_ops.reader_inputs(
       question_token_ids=question_token_ids,
       block_token_ids=block_token_ids,
@@ -183,6 +200,7 @@ def read(features, retriever_logits, blocks, mode, params, labels):
       answer_lengths=answer_lengths,
       cls_token_id=tf.cast(cls_token_id, tf.int32),
       sep_token_id=tf.cast(sep_token_id, tf.int32),
+      mask_token_id=tf.cast(mask_token_id, tf.int32),
       max_sequence_len=params["reader_seq_len"])
 
   tf.summary.scalar("reader_nonpad_ratio",
@@ -193,59 +211,60 @@ def read(features, retriever_logits, blocks, mode, params, labels):
       tags={"train"} if mode == tf.estimator.ModeKeys.TRAIN else {},
       trainable=True)
 
-  concat_outputs = reader_module(
-      dict(
-          input_ids=concat_inputs.token_ids,
-          input_mask=concat_inputs.mask,
-          segment_ids=concat_inputs.segment_ids),
-      signature="tokens",
-      as_dict=True)
+  if qa_type == 'extractive':
+    concat_outputs = reader_module(
+        dict(
+            input_ids=concat_inputs.token_ids,
+            input_mask=concat_inputs.mask,
+            segment_ids=concat_inputs.segment_ids),
+        signature="tokens",
+        as_dict=True)
 
-  concat_token_emb = concat_outputs["sequence_output"]
+    concat_token_emb = concat_outputs["sequence_output"]
 
-  # [num_spans], [num_spans], [reader_beam_size, num_spans]
-  candidate_starts, candidate_ends, candidate_mask = span_candidates(
+    # [num_spans], [num_spans], [reader_beam_size, num_spans]
+    candidate_starts, candidate_ends, candidate_mask = span_candidates(
       concat_inputs.block_mask, params["max_span_width"])
 
-  # Score with an MLP to enable start/end interaction:
-  # score(s, e) = w·σ(w_s·h_s + w_e·h_e)
-  kernel_initializer = tf.truncated_normal_initializer(stddev=0.02)
+    # Score with an MLP to enable start/end interaction:
+    # score(s, e) = w·σ(w_s·h_s + w_e·h_e)
+    kernel_initializer = tf.truncated_normal_initializer(stddev=0.02)
 
-  # [reader_beam_size, max_sequence_len, span_hidden_size * 2]
-  projection = tf.layers.dense(
+    # [reader_beam_size, max_sequence_len, span_hidden_size * 2]
+    projection = tf.layers.dense(
       concat_token_emb,
       params["span_hidden_size"] * 2,
       kernel_initializer=kernel_initializer)
 
-  # [reader_beam_size, max_sequence_len, span_hidden_size]
-  start_projection, end_projection = tf.split(projection, 2, -1)
+    # [reader_beam_size, max_sequence_len, span_hidden_size]
+    start_projection, end_projection = tf.split(projection, 2, -1)
 
-  # [reader_beam_size, num_candidates, span_hidden_size]
-  candidate_start_projections = tf.gather(
+    # [reader_beam_size, num_candidates, span_hidden_size]
+    candidate_start_projections = tf.gather(
       start_projection, candidate_starts, axis=1)
-  candidate_end_projection = tf.gather(end_projection, candidate_ends, axis=1)
-  candidate_hidden = candidate_start_projections + candidate_end_projection
+    candidate_end_projection = tf.gather(end_projection, candidate_ends, axis=1)
+    candidate_hidden = candidate_start_projections + candidate_end_projection
 
-  candidate_hidden = tf.nn.relu(candidate_hidden)
-  candidate_hidden = tf.keras.layers.LayerNormalization(axis=-1)(
+    candidate_hidden = tf.nn.relu(candidate_hidden)
+    candidate_hidden = tf.keras.layers.LayerNormalization(axis=-1)(
       candidate_hidden)
 
-  # [reader_beam_size, num_candidates, 1]
-  reader_logits = tf.layers.dense(
+    # [reader_beam_size, num_candidates, 1]
+    reader_logits = tf.layers.dense(
       candidate_hidden, 1, kernel_initializer=kernel_initializer)
 
-  # [reader_beam_size, num_candidates]
-  reader_logits = tf.squeeze(reader_logits)
-  reader_logits += mask_to_score(candidate_mask)
-  reader_logits += tf.expand_dims(retriever_logits, -1)
+    # [reader_beam_size, num_candidates]
+    reader_logits = tf.squeeze(reader_logits)
+    reader_logits += mask_to_score(candidate_mask)
+    reader_logits += tf.expand_dims(retriever_logits, -1)
 
-  # [reader_beam_size, num_candidates]
-  candidate_orig_starts = tf.gather(
+    # [reader_beam_size, num_candidates]
+    candidate_orig_starts = tf.gather(
       params=concat_inputs.token_map, indices=candidate_starts, axis=-1)
-  candidate_orig_ends = tf.gather(
+    candidate_orig_ends = tf.gather(
       params=concat_inputs.token_map, indices=candidate_ends, axis=-1)
 
-  return ReaderOutputs(
+    return ReaderOutputs(
       logits=reader_logits,
       candidate_starts=candidate_starts,
       candidate_ends=candidate_ends,
@@ -258,8 +277,45 @@ def read(features, retriever_logits, blocks, mode, params, labels):
       gold_starts=concat_inputs.gold_starts,
       gold_ends=concat_inputs.gold_ends)
 
+  elif qa_type == 'abstractive':
+    num_blocks = tensor_utils.shape(concat_inputs.token_ids)[0]
+    masked_position = tf.tile(tf.expand_dims(concat_inputs.masked_position, 0), [num_blocks, 1])
+    concat_outputs = reader_module(
+      inputs=dict(
+        input_ids=concat_inputs.token_ids,
+        input_mask=concat_inputs.mask,
+        segment_ids=concat_inputs.segment_ids,
+        mlm_positions=masked_position),
+      signature='mlm',
+      as_dict=True)
+
+    return AbsReaderOutputs(
+      logits=concat_outputs['mlm_logits'],
+      blocks=blocks,
+      orig_blocks=orig_blocks,
+      orig_tokens=orig_tokens,
+      token_ids=concat_inputs.token_ids,
+      answer_token_ids=answer_token_ids)
+
+  else:
+    raise NotImplementedError
+
+
+def _get_final_text(pred_text, orig_text, do_lower_case):
+  pred_text = six.ensure_text(pred_text, errors="ignore")
+  orig_text = six.ensure_text(orig_text, errors="ignore")
+  return squad_lib.get_final_text(
+      pred_text=pred_text,
+      orig_text=orig_text,
+      do_lower_case=do_lower_case)
+
 
 def get_predictions(reader_outputs, params):
+  qa_type = params['qa_type']
+  return eval(f'get_predictions_{qa_type}')(reader_outputs, params)
+
+
+def get_predictions_extractive(reader_outputs, params):
   """Get predictions."""
   tokenization_info = bert_utils.get_tokenization_info(
       params["reader_module_path"])
@@ -294,17 +350,9 @@ def get_predictions(reader_outputs, params):
   predicted_normalized_answer = tf.reduce_join(
       predicted_tokens[predicted_start:predicted_end + 1], separator=" ")
 
-  def _get_final_text(pred_text, orig_text):
-    pred_text = six.ensure_text(pred_text, errors="ignore")
-    orig_text = six.ensure_text(orig_text, errors="ignore")
-    return squad_lib.get_final_text(
-        pred_text=pred_text,
-        orig_text=orig_text,
-        do_lower_case=tokenization_info["do_lower_case"])
-
   predicted_answer = tf.py_func(
       func=_get_final_text,
-      inp=[predicted_normalized_answer, predicted_orig_answer],
+      inp=[predicted_normalized_answer, predicted_orig_answer, tokenization_info['do_lower_case']],
       Tout=tf.string)
 
   return dict(
@@ -316,6 +364,36 @@ def get_predictions(reader_outputs, params):
       orig_start=predicted_orig_start,
       orig_end=predicted_orig_end,
       answer=predicted_answer)
+
+
+def get_predictions_abstractive(reader_outputs, params):
+  tokenization_info = bert_utils.get_tokenization_info(params["reader_module_path"])
+  with tf.io.gfile.GFile(tokenization_info['vocab_file']) as vocab_file:
+    vocab = tf.constant([l.strip() for l in vocab_file.readlines()])
+
+  # [num_blocks, num_masked_tokens, vocab_size]
+  logits = reader_outputs.logits
+  logprobs = tf.math.log_softmax(logits)
+  # [num_blocks, num_masked_tokens]
+  token_ids = tf.argmax(logprobs, -1)
+  logprobs = tf.squeeze(tf.gather(logprobs, tf.expand_dims(token_ids, -1), axis=-1), -1)
+  # [num_blocks]
+  sum_logprobs = tf.reduce_max(logprobs, 1)
+
+  pred_block_id = tf.argmax(sum_logprobs)
+  pred_sum_logprobs = sum_logprobs[pred_block_id]
+  pred_token_ids = token_ids[pred_block_id]
+  pred_tokens = tf.gather(vocab, pred_token_ids)
+  pred = tf.reduce_join(pred_tokens, separator=' ')
+
+  pred = tf.py_func(
+    func=_get_final_text,
+    inp=[pred, pred, tokenization_info['do_lower_case']],
+    Tout=tf.string)
+
+  return dict(
+    answer=pred
+  )
 
 
 def compute_correct_candidates(candidate_starts, candidate_ends, gold_starts,
@@ -470,7 +548,9 @@ def model_fn(features, labels, mode, params):
 
 def serving_fn():
   placeholders = dict(
-      question=tf.placeholder(dtype=tf.string, shape=[], name="question"))
+    question=tf.placeholder(dtype=tf.string, shape=[], name='question'),
+    question_token_ids=tf.placeholder(dtype=tf.int32, shape=[None], name='question_token_ids'),
+    answer_token_ids=tf.placeholder(dtype=tf.int32, shape=[None], name='answer_token_ids'))
   return tf.estimator.export.ServingInputReceiver(placeholders, placeholders)
 
 
@@ -499,11 +579,13 @@ def input_fn(is_train, name, params):
   return dataset
 
 
-def get_predictor(model_dir):
+def get_predictor(model_dir, params: Dict[str, Any] = None):
   """Build a predictor. Can't use SavedModel here due to the py_func."""
   with tf.io.gfile.GFile(os.path.join(model_dir, "params.json")) as f:
-    params = json.load(f)
-
+    _params = json.load(f)
+    if params is not None:
+      _params.update(params)
+  params = _params
 
   if tf.io.gfile.exists(os.path.join(model_dir, 'export')):
     best_checkpoint_pattern = os.path.join(model_dir, "export", "best_default", "checkpoint", "*.index")
@@ -516,13 +598,21 @@ def get_predictor(model_dir):
       labels=None,
       mode=tf.estimator.ModeKeys.PREDICT,
       params=params)
-  question_tensor = serving_input_receiver.receiver_tensors["question"]
+  question_tensor = serving_input_receiver.receiver_tensors['question']
+  question_token_ids_tensor = serving_input_receiver.receiver_tensors['question_token_ids']
+  answer_token_ids_tensor = serving_input_receiver.receiver_tensors['answer_token_ids']
   session = tf.train.MonitoredSession(
       session_creator=tf.train.ChiefSessionCreator(
           checkpoint_filename_with_path=best_checkpoint))
+  hf_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
-  def _predict(question):
+  def _predict(question: str, answer: str = ''):
+    question_token_ids = hf_tokenizer.convert_tokens_to_ids(hf_tokenizer.tokenize(question))
+    answer_token_ids = hf_tokenizer.convert_tokens_to_ids(hf_tokenizer.tokenize(answer))
     return session.run(
-        estimator_spec.predictions, feed_dict={question_tensor: question})
+        estimator_spec.predictions, feed_dict={
+          question_tensor: question,
+          question_token_ids_tensor: question_token_ids,
+          answer_token_ids_tensor: question_token_ids})
 
   return _predict

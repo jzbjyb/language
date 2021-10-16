@@ -57,6 +57,7 @@ REGISTER_OP("ReaderInputs")
     .Input("answer_lengths: int32")
     .Input("cls_token_id: int32")
     .Input("sep_token_id: int32")
+    .Input("mask_token_id: int32")
     .Output("token_ids : int32")
     .Output("mask : int32")
     .Output("segment_ids : int32")
@@ -64,6 +65,7 @@ REGISTER_OP("ReaderInputs")
     .Output("token_map: int32")
     .Output("gold_starts : int32")
     .Output("gold_ends : int32")
+    .Output("masked_position: int32")
     .Attr("max_sequence_len: int")
     .SetShapeFn([](shape_inference::InferenceContext *c) {
       const shape_inference::DimensionHandle num_blocks =
@@ -82,6 +84,7 @@ REGISTER_OP("ReaderInputs")
       c->set_output(
           6, c->MakeShape(
                  {num_blocks, shape_inference::InferenceContext::kUnknownDim}));
+      c->set_output(7, c->MakeShape({shape_inference::InferenceContext::kUnknownDim}));
       return Status::OK();
     })
     .Doc(R"doc(
@@ -108,6 +111,7 @@ class ReaderInputsOp : public tensorflow::OpKernel {
     TTypes<int32>::ConstVec answer_lengths = context->input(5).vec<int32>();
     int32 cls_token_id = context->input(6).scalar<int32>()();
     int32 sep_token_id = context->input(7).scalar<int32>()();
+    int32 mask_token_id = context->input(8).scalar<int32>()();
 
     int num_blocks = block_token_ids.dimension(0);
     int question_length = question_token_ids.dimension(0);
@@ -139,6 +143,7 @@ class ReaderInputsOp : public tensorflow::OpKernel {
     TTypes<int32>::Matrix token_map = token_map_t->matrix<int32>();
 
     std::vector<std::vector<std::pair<int, int>>> spans;
+    std::vector<int> masked_positions_vec;
     int max_answers = 0;
     for (int b = 0; b < num_blocks; ++b) {
       std::vector<int> token_ids_vec;
@@ -156,6 +161,9 @@ class ReaderInputsOp : public tensorflow::OpKernel {
         } else if (question_index < question_length) {
           token_ids_vec.emplace_back(question_token_ids(question_index));
           token_ids(b, i) = question_token_ids(question_index);
+          if (b == 0 && question_token_ids(question_index) == mask_token_id) {
+            masked_positions_vec.emplace_back(i);
+          }
           mask(b, i) = 1;
           segment_ids(b, i) = 0;
           block_mask(b, i) = 0;
@@ -239,6 +247,14 @@ class ReaderInputsOp : public tensorflow::OpKernel {
           gold_ends(b, i) = -1;
         }
       }
+    }
+
+    int num_mask_tokens = masked_positions_vec.size();
+    Tensor *masked_positions_t;
+    OP_REQUIRES_OK(context, context->allocate_output(7, {num_mask_tokens}, &masked_positions_t));
+    TTypes<int>::Vec masked_positions = masked_positions_t->vec<int>();
+    for (int i = 0; i < num_mask_tokens; ++i) {
+      masked_positions(i) = masked_positions_vec.at(i);
     }
   }
 

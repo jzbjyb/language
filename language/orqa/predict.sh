@@ -2,9 +2,9 @@
 
 export PYTHONPATH="../../":"${PYTHONPATH}"
 
-model_dir=$1
-input_file=gs://orqa-data/resplit/WebQuestions.resplit.test.jsonl
-output_file=$2
+model_dir=trained_models/realm
+input_file=~/exp/adapt_knowledge/data/biorel/prompt_qa/test.source  # gs://orqa-data/resplit/WebQuestions.resplit.test.jsonl
+output_file=$1
 
 python -m predict.orqa_predict \
   --dataset_path=${input_file} \

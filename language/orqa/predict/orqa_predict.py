@@ -32,9 +32,13 @@ flags.DEFINE_boolean("print_prediction_samples", True,
                      "Whether to print a sample of the predictions.")
 flags.DEFINE_string("format", "txt", "Format of the dataset file.")
 
+flags.DEFINE_string('qa_type', 'abstractive',
+                    'The type of QA the model performs. Chosen from "extractive", "generative"')
+
 
 def main(_):
-  predictor = orqa_model.get_predictor(FLAGS.model_dir)
+  params = {k: getattr(FLAGS, k) for k in ['qa_type']}
+  predictor = orqa_model.get_predictor(FLAGS.model_dir, params)
   with tf.io.gfile.GFile(FLAGS.predictions_path, "w") as predictions_file:
     with tf.io.gfile.GFile(FLAGS.dataset_path) as dataset_file:
       for i, line in enumerate(dataset_file):
