@@ -1,0 +1,20 @@
+{
+  "batch_size": 16,
+  "block_records_path": "data/biology_intro_500k/blocks.tfr",
+  "block_seq_len": 288,
+  "data_root": "gs://orqa-data/resplit",
+  "eval_batch_size": 16,
+  "learning_rate": 1e-05,
+  "max_span_width": 10,
+  "num_block_records": 898840,
+  "num_train_steps": 316672,
+  "query_seq_len": 64,
+  "reader_beam_size": 5,
+  "reader_module_path": "gs://realm-data/cc_news_pretrained/bert",
+  "reader_seq_len": 320,
+  "retriever_beam_size": 5000,
+  "retriever_module_path": "gs://realm-data/cc_news_pretrained/embedder",
+  "encoded_path": "data/biology_intro_500k/encoded/encoded.ckpt",
+  "span_hidden_size": 256,
+  "use_tpu": null
+}

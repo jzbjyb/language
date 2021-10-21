@@ -29,6 +29,7 @@ import tensorflow_hub as hub
 
 flags.DEFINE_string("retriever_module_path", None,
                     "Path to the retriever TF-Hub module.")
+flags.DEFINE_string('encoded_path', None, 'Path to encoded embeddings.')
 flags.DEFINE_string("examples_path", None, "Path to tf.train.Examples")
 flags.DEFINE_integer("num_blocks", 13353718, "Expected number of blocks.")
 flags.DEFINE_integer("num_threads", 48, "Num threads for input reading.")
@@ -110,8 +111,9 @@ def input_fn(params):
 
 
 def main(_):
-  encoded_path = os.path.join(FLAGS.retriever_module_path, "encoded",
-                              "encoded.ckpt")
+  #encoded_path = os.path.join(FLAGS.retriever_module_path, "encoded",
+  #                            "encoded.ckpt")
+  encoded_path = FLAGS.encoded_path
   tf.logging.info("Embeddings will be written to %s", encoded_path)
 
   if FLAGS.use_tpu and FLAGS.tpu_name:

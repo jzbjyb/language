@@ -38,6 +38,7 @@ from absl import flags
 from language.orqa.preprocessing import wiki_preprocessor
 from language.orqa.utils import bert_utils
 import nltk
+from tqdm import tqdm
 import tensorflow.compat.v1 as tf
 
 flags.DEFINE_string("bert_hub_module_path",
@@ -58,15 +59,14 @@ def get_sentence_splitter():
       os.path.join(temp_dir, "tokenizers/punkt/english.pickle"))
 
 
-def create_block_info(input_path, preprocessor):
+def create_block_info(input_path, preprocessor, format: str = 'json'):
   """Create block info."""
   results = []
   html_parser = parser.HTMLParser()
   with tf.io.gfile.GFile(input_path) as input_file:
-    for line in input_file:
-      results.extend(
-          wiki_preprocessor.example_from_json_line(line, html_parser,
-                                                   preprocessor))
+    for line in tqdm(input_file):
+      result = wiki_preprocessor.example_from_json_line(line, html_parser, preprocessor, format=format)
+      results.extend(result)
   return results
 
 
@@ -77,7 +77,7 @@ def main(_):
   preprocessor = wiki_preprocessor.Preprocessor(get_sentence_splitter(),
                                                 FLAGS.max_block_length,
                                                 tokenizer)
-  mapper = functools.partial(create_block_info, preprocessor=preprocessor)
+  mapper = functools.partial(create_block_info, preprocessor=preprocessor, format='csv')
   block_count = 0
   input_paths = tf.io.gfile.glob(FLAGS.input_pattern)
   random.shuffle(input_paths)

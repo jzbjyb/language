@@ -96,12 +96,21 @@ def remove_doc(title):
                   r"(.*\(disambiguation\).*)", title)
 
 
-def example_from_json_line(line, html_parser, preprocessor):
+def example_from_json_line(line, html_parser, preprocessor, format: str = 'json'):
   if not isinstance(line, six.text_type):
     line = line.decode("utf-8")
-  data = json.loads(line)
-  title = data["title"]
-  if not remove_doc(title):
-    text = html_parser.unescape(data["text"])
-    for info in preprocessor.generate_block_info(title, text):
-      yield info
+  if format == 'json':
+    data = json.loads(line)
+    title = data["title"]
+    if not remove_doc(title):
+      text = html_parser.unescape(data["text"])
+      for info in preprocessor.generate_block_info(title, text):
+        yield info
+  elif format == 'csv':
+    title, text = line.rstrip('\n').split('\t')
+    if not remove_doc(title):
+      text = html_parser.unescape(text)
+      for info in preprocessor.generate_block_info(title, text):
+        yield info
+  else:
+    raise NotImplementedError

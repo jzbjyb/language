@@ -36,15 +36,14 @@ from official.nlp.data import squad_lib
 from transformers import BertTokenizer
 
 
-RetrieverOutputs = collections.namedtuple("RetrieverOutputs",
-                                          ["logits", "blocks"])
+RetrieverOutputs = collections.namedtuple("RetrieverOutputs", ["logits", "blocks", 'block_ids'])
 ReaderOutputs = collections.namedtuple("ReaderOutputs", [
     "logits", "candidate_starts", "candidate_ends", "candidate_orig_starts",
-    "candidate_orig_ends", "blocks", "orig_blocks", "orig_tokens", "token_ids",
+    "candidate_orig_ends", "blocks", "orig_blocks", 'block_ids', "orig_tokens", "token_ids",
     "gold_starts", "gold_ends"
 ])
 AbsReaderOutputs = collections.namedtuple('AbsReaderOutputs', [
-  'logits', 'blocks', 'orig_blocks', 'orig_tokens', 'token_ids', 'answer_token_ids'])
+  'logits', 'blocks', 'orig_blocks', 'block_ids', 'orig_tokens', 'token_ids', 'answer_token_ids'])
 
 
 def span_candidates(masks, max_span_width):
@@ -124,10 +123,13 @@ def retrieve(features, retriever_beam_size, mode, params):
           segment_ids=tf.zeros_like(question_token_ids)),
       signature="projected")
 
+  if 'encoded_path' in params:
+    encoded_path = params['encoded_path']
+  else:
+    encoded_path = os.path.join(params['retriever_module_path'], 'encoded', 'encoded.ckpt')
   block_emb, searcher = scann_utils.load_scann_searcher(
       var_name="block_emb",
-      checkpoint_path=os.path.join(params["retriever_module_path"], "encoded",
-                                   "encoded.ckpt"),
+      checkpoint_path=encoded_path,
       num_neighbors=retriever_beam_size)
 
   # [1, retriever_beam_size]
@@ -157,10 +159,10 @@ def retrieve(features, retriever_beam_size, mode, params):
       "blocks",
       initializer=tf.data.experimental.get_single_element(blocks_dataset))
   retrieved_blocks = tf.gather(blocks, retrieved_block_ids)
-  return RetrieverOutputs(logits=retrieved_logits, blocks=retrieved_blocks)
+  return RetrieverOutputs(logits=retrieved_logits, blocks=retrieved_blocks, block_ids=retrieved_block_ids)
 
 
-def read(features, retriever_logits, blocks, mode, params, labels):
+def read(features, retriever_logits, blocks, block_ids, mode, params, labels):
   qa_type = params['qa_type']
 
   """Do reading."""
@@ -272,6 +274,7 @@ def read(features, retriever_logits, blocks, mode, params, labels):
       candidate_orig_ends=candidate_orig_ends,
       blocks=blocks,
       orig_blocks=orig_blocks,
+      block_ids=block_ids,
       orig_tokens=orig_tokens,
       token_ids=concat_inputs.token_ids,
       gold_starts=concat_inputs.gold_starts,
@@ -299,6 +302,7 @@ def read(features, retriever_logits, blocks, mode, params, labels):
       logits=mlm_logit,
       blocks=blocks,
       orig_blocks=orig_blocks,
+      block_ids=block_ids,
       orig_tokens=orig_tokens,
       token_ids=concat_inputs.token_ids,
       answer_token_ids=answer_token_ids)
@@ -399,7 +403,9 @@ def get_predictions_abstractive(reader_outputs, params):
 
   return dict(
     answer=pred,
-    logprob=pred_sum_logprobs
+    logprob=pred_sum_logprobs,
+    blocks=reader_outputs.orig_blocks,
+    block_ids=reader_outputs.block_ids
   )
 
 
@@ -434,7 +440,9 @@ def get_predictions_multichoice(reader_outputs, params):
 
   return dict(
     answer=pred,
-    logprob=pred_sum_logprobs
+    logprob=pred_sum_logprobs,
+    blocks=reader_outputs.orig_blocks,
+    block_ids=reader_outputs.block_ids
   )
 
 
@@ -537,6 +545,7 @@ def model_fn(features, labels, mode, params):
         features=features,
         retriever_logits=retriever_outputs.logits[:reader_beam_size],
         blocks=retriever_outputs.blocks[:reader_beam_size],
+        block_ids=retriever_outputs.block_ids[:reader_beam_size],
         mode=mode,
         params=params,
         labels=labels)

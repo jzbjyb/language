@@ -33,7 +33,7 @@ flags.DEFINE_boolean("print_prediction_samples", True,
 flags.DEFINE_string("format", "txt", "Format of the dataset file.")
 
 flags.DEFINE_string('qa_type', 'abstractive',
-                    'The type of QA the model performs. Chosen from "extractive", "generative", "multichoice"')
+                    'The type of QA the model performs. Chosen from "extractive", "abstractive", "multichoice"')
 
 
 def main(_):
@@ -43,7 +43,8 @@ def main(_):
   predictor = orqa_model.get_predictor(FLAGS.model_dir, params)
   with tf.io.gfile.GFile(FLAGS.question_path) as qfin, \
     tf.io.gfile.GFile(FLAGS.answer_path) as afin, \
-    tf.io.gfile.GFile(FLAGS.predictions_path, 'w') as pfout:
+    tf.io.gfile.GFile(FLAGS.predictions_path, 'w') as pfout, \
+    tf.io.gfile.GFile(FLAGS.predictions_path + '.ret', 'w') as rfout:
     for i, line in enumerate(qfin):
       if FLAGS.format == 'jsonl':
         example = json.loads(line)
@@ -63,7 +64,10 @@ def main(_):
         predictions = predictor(question, answer, num_mask_hint=num_mask_hint)
         pred = six.ensure_text(predictions['answer'], errors='ignore')
         logprob = predictions['logprob']
+        blocks = [six.ensure_text(b, errors="ignore").replace("\n", " ") for b in predictions['blocks']]
+        block_ids = predictions['block_ids']
         pfout.write(('\t' if j > 0 else '') + f'{pred}\t{logprob}')
+        rfout.write('\t'.join(f'{bid} ||  || {b}' for b, bid in zip(blocks, block_ids)) + '\n')
       pfout.write('\n')
       if FLAGS.print_prediction_samples and i & (i - 1) == 0:
         logging.info(f'[{i}] {question} -> {pred}')

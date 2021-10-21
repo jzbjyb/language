@@ -4,10 +4,10 @@ export PYTHONPATH="../../":"${PYTHONPATH}"
 
 qa_type=$1
 data_dir=$2  # ~/exp/adapt_knowledge/data/biorel/prompt_mc_333/
-output_file=$3
+model_dir=$3  # trained_models/realm_biology_intro_500k
+output_file=$4
 question_file=${data_dir}/test.source
 answer_file=${data_dir}/test.target
-model_dir=trained_models/realm
 
 python -m predict.orqa_predict \
   --question_path=${question_file} \
