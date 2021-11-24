@@ -104,6 +104,14 @@ def retrieve(features, retriever_beam_size, mode, params):
   '''
   question_token_ids = tf.cast(tf.expand_dims(features['question_token_ids'], 0), tf.int32)
 
+  if params['has_context']:  # use context instead of retrieval
+    context = tf.expand_dims(features['context'], 0)
+    context_token_ids = tf.cast(tf.expand_dims(features['context_token_ids'], 0), tf.int32)
+    assert retriever_beam_size == 1
+    return RetrieverOutputs(logits=tf.cast(context_token_ids[:1], tf.float32) * 0.0,
+                            blocks=context,
+                            block_ids=context_token_ids[:1] * 0)  # TODO: better implmentation
+
   cls_token_id = vocab_lookup_table.lookup(tf.constant("[CLS]"))
   sep_token_id = vocab_lookup_table.lookup(tf.constant("[SEP]"))
   question_token_ids = tf.concat(
@@ -601,7 +609,9 @@ def serving_fn():
   placeholders = dict(
     question=tf.placeholder(dtype=tf.string, shape=[], name='question'),
     question_token_ids=tf.placeholder(dtype=tf.int32, shape=[None], name='question_token_ids'),
-    answer_token_ids=tf.placeholder(dtype=tf.int32, shape=[None], name='answer_token_ids'))
+    answer_token_ids=tf.placeholder(dtype=tf.int32, shape=[None], name='answer_token_ids'),
+    context=tf.placeholder(dtype=tf.string, shape=[], name='context'),
+    context_token_ids=tf.placeholder(dtype=tf.int32, shape=[None], name='context_token_ids'))
   return tf.estimator.export.ServingInputReceiver(placeholders, placeholders)
 
 
@@ -652,20 +662,26 @@ def get_predictor(model_dir, params: Dict[str, Any] = None):
   question_tensor = serving_input_receiver.receiver_tensors['question']
   question_token_ids_tensor = serving_input_receiver.receiver_tensors['question_token_ids']
   answer_token_ids_tensor = serving_input_receiver.receiver_tensors['answer_token_ids']
+  context_tensor = serving_input_receiver.receiver_tensors['context']
+  context_token_ids_tensor = serving_input_receiver.receiver_tensors['context_token_ids']
   session = tf.train.MonitoredSession(
       session_creator=tf.train.ChiefSessionCreator(
           checkpoint_filename_with_path=best_checkpoint))
   hf_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
-  def _predict(question: str, answer: str = '', num_mask_hint: bool = False, mask_token: str = '[MASK]'):
+  def _predict(question: str, answer: str = '', context: str = None, num_mask_hint: bool = False, mask_token: str = '[MASK]'):
     answer_token_ids = hf_tokenizer.convert_tokens_to_ids(hf_tokenizer.tokenize(answer))
     if num_mask_hint:
       question = question.replace(mask_token, ' '.join([mask_token] * len(answer_token_ids)))
     question_token_ids = hf_tokenizer.convert_tokens_to_ids(hf_tokenizer.tokenize(question))
-    return session.run(
-        estimator_spec.predictions, feed_dict={
-          question_tensor: question,
-          question_token_ids_tensor: question_token_ids,
-          answer_token_ids_tensor: answer_token_ids})
+    fd = {
+      question_tensor: question,
+      question_token_ids_tensor: question_token_ids,
+      answer_token_ids_tensor: answer_token_ids}
+    if context is not None:
+      context_token_ids = hf_tokenizer.convert_tokens_to_ids(hf_tokenizer.tokenize(context))
+      fd[context_tensor] = context
+      fd[context_token_ids_tensor] = context_token_ids
+    return session.run(estimator_spec.predictions, feed_dict=fd)
 
   return _predict

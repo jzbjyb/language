@@ -32,6 +32,8 @@ flags.DEFINE_boolean("print_prediction_samples", True,
                      "Whether to print a sample of the predictions.")
 flags.DEFINE_string("format", "txt", "Format of the dataset file.")
 
+flags.DEFINE_integer('reader_beam_size', 5, 'Reader beam size.')
+flags.DEFINE_boolean('has_context', False, 'use context instead of retrieval')
 flags.DEFINE_string('qa_type', 'abstractive',
                     'The type of QA the model performs. Chosen from "extractive", "abstractive", "multichoice"')
 
@@ -39,29 +41,36 @@ flags.DEFINE_string('qa_type', 'abstractive',
 def main(_):
   FLAGS.answer_path = FLAGS.answer_path or FLAGS.question_path
   num_mask_hint = FLAGS.qa_type == 'multichoice'
-  params = {k: getattr(FLAGS, k) for k in ['qa_type']}
+  params = {k: getattr(FLAGS, k) for k in {'qa_type', 'has_context', 'reader_beam_size'}}
   predictor = orqa_model.get_predictor(FLAGS.model_dir, params)
   with tf.io.gfile.GFile(FLAGS.question_path) as qfin, \
     tf.io.gfile.GFile(FLAGS.answer_path) as afin, \
     tf.io.gfile.GFile(FLAGS.predictions_path, 'w') as pfout, \
     tf.io.gfile.GFile(FLAGS.predictions_path + '.ret', 'w') as rfout:
     for i, line in enumerate(qfin):
+      context = [None]
       if FLAGS.format == 'jsonl':
         example = json.loads(line)
         questions = [example['question']]
         answers = ['']
       elif FLAGS.format == 'txt':
-        questions = [line.strip()]
+        ls = line.strip().split('\t')
+        if not FLAGS.has_context:
+          questions = ls[:1]
+        else:
+          questions = ls[:1]
+          context = [' '.join(ls[1:])] or ['']  # concatenate title/body
         answers = afin.readline().rstrip('\n')
         if FLAGS.qa_type == 'multichoice':
           answers = answers.split('\t')
         else:
           answers = [answers]
         questions = questions * len(answers)
+        contexts = context * len(answers)
       else:
         raise NotImplementedError
-      for j, (question, answer) in enumerate(zip(questions, answers)):
-        predictions = predictor(question, answer, num_mask_hint=num_mask_hint)
+      for j, (question, answer, context) in enumerate(zip(questions, answers, contexts)):
+        predictions = predictor(question, answer, context=context, num_mask_hint=num_mask_hint)
         pred = six.ensure_text(predictions['answer'], errors='ignore')
         logprob = predictions['logprob']
         blocks = [six.ensure_text(b, errors="ignore").replace("\n", " ") for b in predictions['blocks']]
