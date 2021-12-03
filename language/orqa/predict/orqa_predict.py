@@ -17,6 +17,7 @@
 import json
 from absl import flags
 from absl import logging
+from tqdm import tqdm
 from language.orqa.models import orqa_model
 import six
 import tensorflow.compat.v1 as tf
@@ -33,6 +34,7 @@ flags.DEFINE_boolean("print_prediction_samples", True,
 flags.DEFINE_string("format", "txt", "Format of the dataset file.")
 
 flags.DEFINE_integer('reader_beam_size', 5, 'Reader beam size.')
+flags.DEFINE_integer('max_num_mask', 5, 'Max number of mask token used in prediction.')
 flags.DEFINE_boolean('has_context', False, 'use context instead of retrieval')
 flags.DEFINE_string('qa_type', 'abstractive',
                     'The type of QA the model performs. Chosen from "extractive", "abstractive", "multichoice"')
@@ -41,13 +43,16 @@ flags.DEFINE_string('qa_type', 'abstractive',
 def main(_):
   FLAGS.answer_path = FLAGS.answer_path or FLAGS.question_path
   num_mask_hint = FLAGS.qa_type == 'multichoice'
+  if num_mask_hint:  FLAGS.max_num_mask = 1
+
   params = {k: getattr(FLAGS, k) for k in {'qa_type', 'has_context', 'reader_beam_size'}}
   predictor = orqa_model.get_predictor(FLAGS.model_dir, params)
+
   with tf.io.gfile.GFile(FLAGS.question_path) as qfin, \
     tf.io.gfile.GFile(FLAGS.answer_path) as afin, \
     tf.io.gfile.GFile(FLAGS.predictions_path, 'w') as pfout, \
     tf.io.gfile.GFile(FLAGS.predictions_path + '.ret', 'w') as rfout:
-    for i, line in enumerate(qfin):
+    for i, line in tqdm(enumerate(qfin)):
       context = [None]
       if FLAGS.format == 'jsonl':
         example = json.loads(line)
@@ -70,7 +75,8 @@ def main(_):
       else:
         raise NotImplementedError
       for j, (question, answer, context) in enumerate(zip(questions, answers, contexts)):
-        predictions = predictor(question, answer, context=context, num_mask_hint=num_mask_hint)
+        predictions = predictor(question, answer, context=context,
+                                num_mask_hint=num_mask_hint, max_num_mask=FLAGS.max_num_mask)
         pred = six.ensure_text(predictions['answer'], errors='ignore')
         logprob = predictions['logprob']
         blocks = [six.ensure_text(b, errors="ignore").replace("\n", " ") for b in predictions['blocks']]

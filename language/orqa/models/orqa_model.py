@@ -14,7 +14,7 @@
 # limitations under the License.
 # Lint as: python3
 """ORQA model."""
-from typing import Dict, Any
+from typing import Dict, Any, List
 import collections
 import json
 import os
@@ -106,7 +106,7 @@ def retrieve(features, retriever_beam_size, mode, params):
 
   if params['has_context']:  # use context instead of retrieval
     context = tf.expand_dims(features['context'], 0)
-    context_token_ids = tf.cast(tf.expand_dims(features['context_token_ids'], 0), tf.int32)
+    context_token_ids = tf.cast(features['context_token_ids'], tf.int32)
     assert retriever_beam_size == 1
     return RetrieverOutputs(logits=tf.cast(context_token_ids[:1], tf.float32) * 0.0,
                             blocks=context,
@@ -396,7 +396,7 @@ def get_predictions_abstractive(reader_outputs, params):
   token_ids = tf.argmax(logprobs, -1)
   logprobs = tf.squeeze(tf.gather(logprobs, tf.expand_dims(token_ids, -1), axis=2, batch_dims=2), -1)
   # [num_blocks]
-  sum_logprobs = tf.reduce_max(logprobs, 1)
+  sum_logprobs = tf.reduce_sum(logprobs, 1)
 
   pred_block_id = tf.argmax(sum_logprobs)
   pred_sum_logprobs = sum_logprobs[pred_block_id]
@@ -669,19 +669,41 @@ def get_predictor(model_dir, params: Dict[str, Any] = None):
           checkpoint_filename_with_path=best_checkpoint))
   hf_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
-  def _predict(question: str, answer: str = '', context: str = None, num_mask_hint: bool = False, mask_token: str = '[MASK]'):
+  def _predict(question: str,
+               answer: str = '',
+               context: str = None,
+               num_mask_hint: bool = False,
+               max_num_mask: int = 1,
+               mask_token: str = '[MASK]'):
     answer_token_ids = hf_tokenizer.convert_tokens_to_ids(hf_tokenizer.tokenize(answer))
-    if num_mask_hint:
-      question = question.replace(mask_token, ' '.join([mask_token] * len(answer_token_ids)))
-    question_token_ids = hf_tokenizer.convert_tokens_to_ids(hf_tokenizer.tokenize(question))
-    fd = {
-      question_tensor: question,
-      question_token_ids_tensor: question_token_ids,
-      answer_token_ids_tensor: answer_token_ids}
     if context is not None:
       context_token_ids = hf_tokenizer.convert_tokens_to_ids(hf_tokenizer.tokenize(context))
-      fd[context_tensor] = context
-      fd[context_token_ids_tensor] = context_token_ids
-    return session.run(estimator_spec.predictions, feed_dict=fd)
+
+    # prepare question by enumerating using multiple masks
+    questions: List[str] = []
+    if num_mask_hint:
+      questions.append(question.replace(mask_token, ' '.join([mask_token] * len(answer_token_ids))))
+    else:
+      assert max_num_mask >= 1
+      for i in range(max_num_mask):
+        questions.append(question.replace(mask_token, ' '.join([mask_token] * (i + 1))))
+
+    # run the model
+    predictions: List = []
+    for question in questions:
+      question_token_ids = hf_tokenizer.convert_tokens_to_ids(hf_tokenizer.tokenize(question))
+      fd = {
+        question_tensor: question,
+        question_token_ids_tensor: question_token_ids,
+        answer_token_ids_tensor: answer_token_ids}
+      if context is not None:
+        fd[context_tensor] = context
+        fd[context_token_ids_tensor] = context_token_ids
+      prediction = session.run(estimator_spec.predictions, feed_dict=fd)
+      predictions.append(prediction)
+
+    # choose the best prediction
+    predictions = sorted(predictions, key=lambda x: -x['logprob'])
+    return predictions[0]
 
   return _predict
